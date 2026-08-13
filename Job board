@@ -1,0 +1,1305 @@
+
+
+server/package.json
+
+{
+  "name": "job-board-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.18.0",
+    "multer": "^2.0.2",
+    "nodemailer": "^7.0.6"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
+
+server/.env
+
+PORT=5000
+MONGO_URI=mongodb://127.0.0.1:27017/jobboard
+JWT_SECRET=my_super_secret_key
+CLIENT_URL=http://localhost:5173
+
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_app_password
+
+server/models/User.js
+
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: true
+    },
+
+    email: {
+      type: String,
+      required: true,
+      unique: true
+    },
+
+    password: {
+      type: String,
+      required: true
+    },
+
+    role: {
+      type: String,
+      enum: ["candidate", "employer"],
+      default: "candidate"
+    },
+
+    phone: String,
+
+    bio: String
+  },
+  {
+    timestamps: true
+  }
+);
+
+export default mongoose.model("User", userSchema);
+
+server/models/Job.js
+
+import mongoose from "mongoose";
+
+const jobSchema = new mongoose.Schema(
+  {
+    title: {
+      type: String,
+      required: true
+    },
+
+    company: {
+      type: String,
+      required: true
+    },
+
+    location: {
+      type: String,
+      required: true
+    },
+
+    type: {
+      type: String,
+      default: "Full Time"
+    },
+
+    salary: String,
+
+    description: {
+      type: String,
+      required: true
+    },
+
+    requirements: [String],
+
+    featured: {
+      type: Boolean,
+      default: false
+    },
+
+    employer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
+export default mongoose.model("Job", jobSchema);
+
+server/models/Application.js
+
+import mongoose from "mongoose";
+
+const applicationSchema = new mongoose.Schema(
+  {
+    job: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Job",
+      required: true
+    },
+
+    candidate: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true
+    },
+
+    resume: String,
+
+    coverLetter: String,
+
+    status: {
+      type: String,
+      enum: [
+        "Applied",
+        "Shortlisted",
+        "Rejected",
+        "Hired"
+      ],
+      default: "Applied"
+    }
+  },
+  {
+    timestamps: true
+  }
+);
+
+applicationSchema.index(
+  {
+    job: 1,
+    candidate: 1
+  },
+  {
+    unique: true
+  }
+);
+
+export default mongoose.model(
+  "Application",
+  applicationSchema
+);
+
+server/middleware/auth.js
+
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+
+export async function auth(req, res, next) {
+  try {
+    const header = req.headers.authorization;
+
+    if (!header) {
+      return res.status(401).json({
+        message: "Login required"
+      });
+    }
+
+    const token = header.split(" ")[1];
+
+    const decoded = jwt.verify(
+      token,
+      process.env.JWT_SECRET
+    );
+
+    req.user = await User.findById(
+      decoded.id
+    ).select("-password");
+
+    if (!req.user) {
+      return res.status(401).json({
+        message: "User not found"
+      });
+    }
+
+    next();
+
+  } catch (error) {
+    res.status(401).json({
+      message: "Invalid token"
+    });
+  }
+}
+
+export function employerOnly(req, res, next) {
+  if (req.user.role !== "employer") {
+    return res.status(403).json({
+      message: "Employer access only"
+    });
+  }
+
+  next();
+}
+
+export function candidateOnly(req, res, next) {
+  if (req.user.role !== "candidate") {
+    return res.status(403).json({
+      message: "Candidate access only"
+    });
+  }
+
+  next();
+}
+
+server/routes/auth.js
+
+import express from "express";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import User from "../models/User.js";
+import { auth } from "../middleware/auth.js";
+
+const router = express.Router();
+
+router.post("/register", async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      password,
+      role
+    } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: "All fields are required"
+      });
+    }
+
+    const existingUser =
+      await User.findOne({ email });
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: "Email already registered"
+      });
+    }
+
+    const hashedPassword =
+      await bcrypt.hash(password, 12);
+
+    const user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+      role
+    });
+
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d"
+      }
+    );
+
+    res.status(201).json({
+      token,
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message
+    });
+  }
+});
+
+router.post("/login", async (req, res) => {
+  try {
+    const {
+      email,
+      password
+    } = req.body;
+
+    const user =
+      await User.findOne({ email });
+
+    if (!user) {
+      return res.status(401).json({
+        message: "Invalid email or password"
+      });
+    }
+
+    const valid =
+      await bcrypt.compare(
+        password,
+        user.password
+      );
+
+    if (!valid) {
+      return res.status(401).json({
+        message: "Invalid email or password"
+      });
+    }
+
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      {
+        expiresIn: "7d"
+      }
+    );
+
+    res.json({
+      token,
+
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message
+    });
+  }
+});
+
+router.get("/me", auth, (req, res) => {
+  res.json(req.user);
+});
+
+export default router;
+
+server/routes/jobs.js
+
+import express from "express";
+import Job from "../models/Job.js";
+import {
+  auth,
+  employerOnly
+} from "../middleware/auth.js";
+
+const router = express.Router();
+
+
+// GET ALL JOBS
+router.get("/", async (req, res) => {
+  try {
+    const {
+      search = "",
+      location = "",
+      type = ""
+    } = req.query;
+
+    const query = {};
+
+    if (search) {
+      query.$or = [
+        {
+          title: {
+            $regex: search,
+            $options: "i"
+          }
+        },
+        {
+          company: {
+            $regex: search,
+            $options: "i"
+          }
+        }
+      ];
+    }
+
+    if (location) {
+      query.location = {
+        $regex: location,
+        $options: "i"
+      };
+    }
+
+    if (type) {
+      query.type = type;
+    }
+
+    const jobs = await Job.find(query)
+      .populate("employer", "name email")
+      .sort({
+        createdAt: -1
+      });
+
+    res.json(jobs);
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message
+    });
+  }
+});
+
+
+// FEATURED JOBS
+router.get("/featured", async (req, res) => {
+  try {
+    const jobs = await Job.find({
+      featured: true
+    })
+      .sort({
+        createdAt: -1
+      })
+      .limit(6);
+
+    res.json(jobs);
+
+  } catch (error) {
+    res.status(500).json({
+      message: error.message
+    });
+  }
+});
+
+
+// EMPLOYER JOBS
+router.get(
+  "/employer/mine",
+  auth,
+  employerOnly,
+  async (req, res) => {
+    const jobs = await Job.find({
+      employer: req.user._id
+    });
+
+    res.json(jobs);
+  }
+);
+
+
+// GET SINGLE JOB
+router.get("/:id", async (req, res) => {
+  try {
+    const job = await Job.findById(
+      req.params.id
+    ).populate(
+      "employer",
+      "name email"
+    );
+
+    if (!job) {
+      return res.status(404).json({
+        message: "Job not found"
+      });
+    }
+
+    res.json(job);
+
+  } catch {
+    res.status(404).json({
+      message: "Job not found"
+    });
+  }
+});
+
+
+// CREATE JOB
+router.post(
+  "/",
+  auth,
+  employerOnly,
+  async (req, res) => {
+    try {
+      const job = await Job.create({
+        ...req.body,
+        employer: req.user._id
+      });
+
+      res.status(201).json(job);
+
+    } catch (error) {
+      res.status(400).json({
+        message: error.message
+      });
+    }
+  }
+);
+
+
+// DELETE JOB
+router.delete(
+  "/:id",
+  auth,
+  employerOnly,
+  async (req, res) => {
+    const job =
+      await Job.findOneAndDelete({
+        _id: req.params.id,
+        employer: req.user._id
+      });
+
+    if (!job) {
+      return res.status(404).json({
+        message: "Job not found"
+      });
+    }
+
+    res.json({
+      message: "Job deleted successfully"
+    });
+  }
+);
+
+export default router;
+
+server/routes/applications.js
+
+import express from "express";
+import multer from "multer";
+import path from "path";
+import Application from "../models/Application.js";
+import Job from "../models/Job.js";
+import {
+  auth,
+  candidateOnly,
+  employerOnly
+} from "../middleware/auth.js";
+
+const router = express.Router();
+
+const storage =
+  multer.diskStorage({
+    destination: "uploads/",
+
+    filename: (req, file, cb) => {
+      cb(
+        null,
+        Date.now() +
+          "-" +
+          file.originalname
+      );
+    }
+  });
+
+const upload =
+  multer({
+    storage,
+
+    limits: {
+      fileSize: 5 * 1024 * 1024
+    },
+
+    fileFilter: (
+      req,
+      file,
+      cb
+    ) => {
+      const allowed = [
+        ".pdf",
+        ".doc",
+        ".docx"
+      ];
+
+      const ext =
+        path.extname(
+          file.originalname
+        ).toLowerCase();
+
+      if (allowed.includes(ext)) {
+        cb(null, true);
+      } else {
+        cb(
+          new Error(
+            "Only PDF, DOC and DOCX allowed"
+          )
+        );
+      }
+    }
+  });
+
+
+// APPLY FOR JOB
+router.post(
+  "/",
+  auth,
+  candidateOnly,
+  upload.single("resume"),
+  async (req, res) => {
+    try {
+      const {
+        jobId,
+        coverLetter
+      } = req.body;
+
+      const job =
+        await Job.findById(jobId);
+
+      if (!job) {
+        return res.status(404).json({
+          message: "Job not found"
+        });
+      }
+
+      const application =
+        await Application.create({
+          job: jobId,
+          candidate: req.user._id,
+          coverLetter,
+          resume: req.file
+            ? `/uploads/${req.file.filename}`
+            : ""
+        });
+
+      res.status(201).json({
+        message:
+          "Application submitted successfully",
+        application
+      });
+
+    } catch (error) {
+      if (error.code === 11000) {
+        return res.status(400).json({
+          message:
+            "You already applied for this job"
+        });
+      }
+
+      res.status(500).json({
+        message: error.message
+      });
+    }
+  }
+);
+
+
+// CANDIDATE APPLICATIONS
+router.get(
+  "/mine",
+  auth,
+  candidateOnly,
+  async (req, res) => {
+    const applications =
+      await Application.find({
+        candidate: req.user._id
+      })
+        .populate(
+          "job",
+          "title company location"
+        )
+        .sort({
+          createdAt: -1
+        });
+
+    res.json(applications);
+  }
+);
+
+
+// EMPLOYER APPLICATIONS
+router.get(
+  "/employer",
+  auth,
+  employerOnly,
+  async (req, res) => {
+    const jobs =
+      await Job.find({
+        employer: req.user._id
+      });
+
+    const jobIds =
+      jobs.map(job => job._id);
+
+    const applications =
+      await Application.find({
+        job: {
+          $in: jobIds
+        }
+      })
+        .populate(
+          "job",
+          "title company"
+        )
+        .populate(
+          "candidate",
+          "name email"
+        )
+        .sort({
+          createdAt: -1
+        });
+
+    res.json(applications);
+  }
+);
+
+
+// UPDATE APPLICATION STATUS
+router.patch(
+  "/:id/status",
+  auth,
+  employerOnly,
+  async (req, res) => {
+    const application =
+      await Application.findById(
+        req.params.id
+      ).populate("job");
+
+    if (!application) {
+      return res.status(404).json({
+        message:
+          "Application not found"
+      });
+    }
+
+    application.status =
+      req.body.status;
+
+    await application.save();
+
+    res.json({
+      message:
+        "Application status updated",
+      application
+    });
+  }
+);
+
+export default router;
+
+server/server.js
+
+import express from "express";
+import mongoose from "mongoose";
+import cors from "cors";
+import dotenv from "dotenv";
+import path from "path";
+import fs from "fs";
+
+import authRoutes
+  from "./routes/auth.js";
+
+import jobRoutes
+  from "./routes/jobs.js";
+
+import applicationRoutes
+  from "./routes/applications.js";
+
+dotenv.config();
+
+const app = express();
+
+
+// CREATE UPLOAD FOLDER
+if (!fs.existsSync("uploads")) {
+  fs.mkdirSync("uploads");
+}
+
+
+// MIDDLEWARE
+app.use(
+  cors({
+    origin:
+      process.env.CLIENT_URL
+  })
+);
+
+app.use(express.json());
+
+app.use(
+  "/uploads",
+  express.static(
+    path.resolve("uploads")
+  )
+);
+
+
+// ROUTES
+app.get("/", (req, res) => {
+  res.json({
+    message:
+      "Job Board API is running"
+  });
+});
+
+app.use(
+  "/api/auth",
+  authRoutes
+);
+
+app.use(
+  "/api/jobs",
+  jobRoutes
+);
+
+app.use(
+  "/api/applications",
+  applicationRoutes
+);
+
+
+// DATABASE
+mongoose
+  .connect(
+    process.env.MONGO_URI
+  )
+  .then(() => {
+
+    console.log(
+      "MongoDB Connected"
+    );
+
+    app.listen(
+      process.env.PORT || 5000,
+      () => {
+        console.log(
+          "Server running on port 5000"
+        );
+      }
+    );
+
+  })
+  .catch(error => {
+    console.log(
+      "MongoDB error:",
+      error.message
+    );
+  });
+
+3. Frontend
+
+client/package.json
+
+{
+  "name": "job-board-client",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.2",
+    "vite": "^7.1.2"
+  }
+}
+
+client/index.html
+
+<!DOCTYPE html>
+
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>JobBoard</title>
+</head>
+
+<body>
+
+  <div id="root"></div>
+
+  <script
+    type="module"
+    src="/src/main.jsx">
+  </script>
+
+</body>
+
+</html>
+
+client/src/main.jsx
+
+import React, {
+  useEffect,
+  useState
+} from "react";
+
+import {
+  createRoot
+} from "react-dom/client";
+
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Link,
+  useNavigate,
+  useParams
+} from "react-router-dom";
+
+import axios from "axios";
+
+import "./style.css";
+
+
+const API =
+  "http://localhost:5000/api";
+
+
+const api =
+  axios.create({
+    baseURL: API
+  });
+
+
+api.interceptors.request.use(
+  config => {
+
+    const token =
+      localStorage.getItem(
+        "token"
+      );
+
+    if (token) {
+      config.headers.Authorization =
+        `Bearer ${token}`;
+    }
+
+    return config;
+  }
+);
+
+
+// NAVBAR
+function Navbar() {
+
+  const user =
+    JSON.parse(
+      localStorage.getItem(
+        "user"
+      ) || "null"
+    );
+
+  const logout = () => {
+
+    localStorage.clear();
+
+    window.location.href =
+      "/";
+  };
+
+
+  return (
+    <nav className="navbar">
+
+      <Link
+        to="/"
+        className="logo"
+      >
+        💼 JobBoard
+      </Link>
+
+
+      <div className="nav-links">
+
+        <Link to="/">
+          Home
+        </Link>
+
+        <Link to="/jobs">
+          Jobs
+        </Link>
+
+
+        {user && (
+          <Link to="/dashboard">
+            Dashboard
+          </Link>
+        )}
+
+
+        {!user ? (
+          <>
+            <Link to="/login">
+              Login
+            </Link>
+
+            <Link
+              to="/register"
+              className="btn"
+            >
+              Register
+            </Link>
+          </>
+        ) : (
+          <button
+            className="logout"
+            onClick={logout}
+          >
+            Logout
+          </button>
+        )}
+
+      </div>
+
+    </nav>
+  );
+}
+
+
+// HOME
+function Home() {
+
+  const [jobs, setJobs] =
+    useState([]);
+
+  useEffect(() => {
+
+    api
+      .get("/jobs/featured")
+      .then(res =>
+        setJobs(res.data)
+      );
+
+  }, []);
+
+
+  return (
+    <>
+      <section className="hero">
+
+        <div className="hero-content">
+
+          <div className="badge">
+            🚀 Find your next opportunity
+          </div>
+
+          <h1>
+            Find a job
+            <br />
+            you <span>love.</span>
+          </h1>
+
+          <p>
+            Discover thousands of job
+            opportunities from companies
+            around the world.
+          </p>
+
+
+          <SearchBox />
+
+        </div>
+
+      </section>
+
+
+      <section className="section">
+
+        <h2>
+          Featured Jobs
+        </h2>
+
+        <p className="subtitle">
+          Explore our latest opportunities
+        </p>
+
+
+        <div className="job-grid">
+
+          {jobs.map(job => (
+            <JobCard
+              key={job._id}
+              job={job}
+            />
+          ))}
+
+        </div>
+
+      </section>
+    </>
+  );
+}
+
+
+// SEARCH
+function SearchBox() {
+
+  const [search, setSearch] =
+    useState("");
+
+  const navigate =
+    useNavigate();
+
+
+  function submit(e) {
+
+    e.preventDefault();
+
+    navigate(
+      `/jobs?search=${encodeURIComponent(
+        search
+      )}`
+    );
+  }
+
+
+  return (
+    <form
+      className="search-box"
+      onSubmit={submit}
+    >
+
+      <input
+        value={search}
+        onChange={e =>
+          setSearch(e.target.value)
+        }
+        placeholder="Job title, company..."
+      />
+
+      <button className="btn">
+        🔍 Search
+      </button>
+
+    </form>
+  );
+}
+
+
+// JOB CARD
+function JobCard({
+  job
+}) {
+
+  return (
+    <Link
+      to={`/jobs/${job._id}`}
+      className="job-card"
+    >
+
+      <div className="job-icon">
+        {job.company?.charAt(0)}
+      </div>
+
+      <div className="job-info">
+
+        <h3>
+          {job.title}
+        </h3>
+
+        <p>
+          {job.company}
+        </p>
+
+        <p>
+          📍 {job.location}
+        </p>
+
+
+        <div className="tags">
+
+          <span>
+            {job.type}
+          </span>
+
+          {job.salary && (
+            <span>
+              💰 {job.salary}
+            </span>
+          )}
+
+        </div>
+
+      </div>
+
+    </Link>
+  );
+}
+
+
+// JOB LISTINGS
+function Jobs() {
+
+  const params =
+    new URLSearchParams(
+      window.location.search
+    );
+
+  const [search, setSearch] =
+    useState(
+      params.get("search") || ""
+    );
+
+  const [jobs, setJobs] =
+    useState([]);
+
+
+  const loadJobs = () => {
+
+    api
+      .get("/jobs", {
+        params: {
+          search
+        }
+      })
+      .then(res =>
+        setJobs(res.data)
+      );
+  };
+
+
+  useEffect(() => {
+    loadJobs();
+  }, []);
+
+
+  return (
+    <section className="section">
+
+      <h1>
+        Find Jobs
+      </h1>
+
+
+      <form
+        className="search-box"
+        onSubmit={e => {
+          e.preventDefault();
+          loadJobs();
+        }}
+      >
+
+        <input
+          value={search}
+          onChange={e =>
+            setSearch(e.target.value)
+          }
+          placeholder="Search jobs..."
+        />
+
+        <button className="btn">
+          Search
+        </button>
+
+      </form>
+
+
+      <div className="job-grid">
+
+        {jobs.map(job => (
+          <JobCard
+            key={job._id}
+            job={job}
+          />
+        ))}
+
+      </div>
+
+    </section>
+  );
+}
+
+
+// JOB D
